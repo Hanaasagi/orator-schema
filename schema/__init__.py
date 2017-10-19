@@ -1,5 +1,7 @@
 import ast
-from collections import defaultdict
+from collections import defaultdict, deque
+from .utils import emap, reverse_path, get_value, get_function_name,\
+    get_function_arg
 
 code = """
 from orator.migrations import Migration
@@ -81,13 +83,13 @@ CONSTRAINT = {
 
 class Field:
 
-    def __init__(self, name, type_):
+    def __init__(self, name, ttype):
         # name is a redundant field
         self._name = name
-        self._type_ = type_
+        self._ttype = ttype
 
     def reset(self):
-        self._type_ = None
+        self._ttype = None
         self._unique = False
         self._nullable = False
         self._default = None
@@ -96,7 +98,7 @@ class Field:
         self._name = new_name
 
     def set_type(self, new_type):
-        self._type_ = new_type
+        self._ttype = new_type
 
     def set_null(self):
         self._nullable = True
@@ -125,8 +127,8 @@ class Field:
 
     def __dump__(self):
         meta = self._get_meta()
-        tmpl = ["table.{_type_}('{_name}')".format_map(meta)]
-        meta.pop('_type_')
+        tmpl = ["table.{_ttype}('{_name}')".format_map(meta)]
+        meta.pop('_ttype')
         meta.pop('_name')
         for k in filter(lambda s: s.startswith('_') and not s.startswith('__'),
                         meta.keys()):
@@ -134,122 +136,13 @@ class Field:
             if v:
                 tmpl.append('.{}()'.format(k.lstrip('_')))
         return ''.join(tmpl)
-        # return "table.{_type_}('{_name}').{_unique}()".format_map(meta)
-
-
-class IntegerField(Field):
-
-    def set_unsigned(self):
-        self._unsigned = True
-
-    def reset(self):
-        self._unsigned = False
-        super().reset()
-
-
-class SmallIntegerField(IntegerField):
-    pass
-
-
-class BigIntegerField(IntegerField):
-    pass
-
-
-class StringField(Field):
-
-    def set_length(self, length):
-        self._length = length
-
-
-class TimestampsField(Field):
-
-    def __dump__(self):
-        meta = self._get_meta()
-        tmpl = ["table.{_type_}()".format_map(meta)]
-        meta.pop('_type_')
-        meta.pop('_name')
-        for k in filter(lambda s: s.startswith('_') and not s.startswith('__'),
-                        meta.keys()):
-            v = meta[k]
-            if v:
-                tmpl.append('.{}()'.format(k.lstrip('_')))
-        return ''.join(tmpl)
-
-
-class TimestampField(Field):
-    pass
-
-
-class ForeignField(Field):
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._ref_table = None
-        self._ref_col = None
-        self.others = None
-
-    def set_reference(self, ref_col):
-        self._ref_col = ref_col
-
-    def set_on(self, ref_table):
-        self._ref_table = ref_table
-
-    def set_on_delete(self):
-        self._on_delete = True
-
-
-class FieldFactory:
-
-    mapping = {
-        'string': StringField,
-        'foreign': ForeignField,
-        'small_integer': SmallIntegerField,
-        'timestamp': TimestampField,
-        'timestamps': TimestampsField,
-    }
-
-    default = Field
-
-    @classmethod
-    def create(cls, name, type_, *args, **kwargs):
-        kls = cls.mapping.get(type_, cls.default)
-        return kls(name, type_, *args, **kwargs)
-
-
-def reverse_path(node):
-    path = [node]
-    while isinstance(node, ast.Call):
-        path.append(node.func.value)
-        node = node.func.value
-    return list(reversed(path))
-
-
-def get_value(node):
-    """
-    get value form ast.Str, ast.Num
-    """
-    if isinstance(node, ast.Str):
-        return node.s
-    elif isinstance(node, ast.Num):
-        return node.n
-    elif isinstance(node, ast.List):
-        return [get_value(x) for x in node.elts]
-    else:
-        tmp_test.append(node)
-        raise TypeError('Unknown AST Type {}'.format(node))
-
-
-def get_type(node):
-    """
-    get type
-    """
-    return node.func.attr
+        # return "table.{_ttype}('{_name}').{_unique}()".format_map(meta)
 
 
 def handle_field_constraint(field, nodes):
     while len(nodes) > 0:
         node = nodes.pop(0)
-        CONSTRAINT[get_type(node)](field, *[get_value(x) for x in node.args])
+        CONSTRAINT[get_function_name(node)](field, *[get_value(x) for x in node.args])
 
 
 def handle_table_constraint(table_name, fields, constraint_type):
@@ -267,22 +160,22 @@ def handle_index(table_name, node):
     args = node.args
     assert len(args) == 1
     cols = get_value(args.pop(0))
-    type_ = node.func.attr
+    ttype = node.func.attr
 
-    if type_.startswith('drop_'):
-        do_drop_index(table_name, type_.lstrip('drop_'), cols)
+    if ttype.startswith('drop_'):
+        do_drop_index(table_name, ttype.lstrip('drop_'), cols)
     else:
-        do_add_index(table_name, type_, cols)
+        do_add_index(table_name, ttype, cols)
 
 
-def do_drop_index(table_name, type_, cols):
+def do_drop_index(table_name, ttype, cols):
     print(schema[table_name]['_ORM_META'])
     schema[table_name]['_ORM_META'].pop(cols)
 
 
-def do_add_index(table_name, type_, cols):
-    index_name = '_'.join((table_name, *to_list(cols), type_))
-    schema[table_name]['_ORM_META'][index_name] = type_
+def do_add_index(table_name, ttype, cols):
+    index_name = '_'.join((table_name, *to_list(cols), ttype))
+    schema[table_name]['_ORM_META'][index_name] = ttype
 
 
 def do_cahnge_col(table_name, node):
@@ -299,7 +192,7 @@ def do_cahnge_col(table_name, node):
     assert len(field.args) > 0
     field_name, *args = field.args
     field_name = get_value(field_name)
-    field_type = get_type(field)
+    field_type = get_function_name(field)
     assert field_name in schema[table_name]
     field_obj = schema[table_name][field_name]
     field_obj.reset()
@@ -324,10 +217,10 @@ def do_rename_col(table_name, old, new):
 def do_add_col(table_name, obj):
     path = reverse_path(obj)
 
-    assert path.pop(0).id == 'table'
+    assert path.popleft().id == 'table'
 
-    field = path.pop(0)
-    field_type = get_type(field)
+    field = path.popleft()
+    field_type = get_function_name(field)
     # Really here? ugly
     field_name, *args = field.args or [ast.Str('timestamps')]
     field_name = get_value(field_name)
@@ -336,40 +229,45 @@ def do_add_col(table_name, obj):
         field_name, field_type)
     handle_field_constraint(field_obj, path)
 
+def _generate_table(table_name, exprs):
+    """generate SQL table representation"""
+    for expr in exprs:
+        obj = expr.value
+        assert isinstance(obj, ast.Call)
+        path = reverse_path(obj)
+        assert path.popleft().id == 'table'
+        collection.append(path)
 
-class Builder(ast.NodeVisitor):
+        node = path.popleft()
+        field_type = get_function_name(node)
+        field_name = get_function_arg(node)
 
-    def _generate_table(self, table_name, exprs):
-        # collection.append(exprs)
-        for expr in exprs:
-            collection.append(expr)
-            obj = expr.value
-            assert isinstance(obj, ast.Call)
+        field = FieldFactory.create() 
 
-            try:
-                is_index = (obj.func.value.id == 'table' and (
-                            obj.func.attr in ('primary', 'unique', 'index') or
-                            obj.func.attr in ('drop_primary', 'drop_unique',
-                                              'drop_index')))
-            except Exception:
-                is_index = False
 
-            if is_index:
-                handle_index(table_name, obj)
-                continue
+        if is_index:
+            handle_index(table_name, obj)
+            continue
 
-            # do some action
-            if obj.func.attr == ACTION.change:
-                do_cahnge_col(table_name, obj.func.value)
-            elif obj.func.attr == ACTION.rename_column:
-                assert len(obj.args) == 2
-                do_rename_col(table_name, *obj.args)
-            elif obj.func.attr == ACTION.drop_column:
-                do_drop_col(table_name, obj.args)
-            else:
-                do_add_col(table_name, obj)
+        # do some action
+        if obj.func.attr == ACTION.change:
+            do_cahnge_col(table_name, obj.func.value)
+        elif obj.func.attr == ACTION.rename_column:
+            assert len(obj.args) == 2
+            do_rename_col(table_name, *obj.args)
+        elif obj.func.attr == ACTION.drop_column:
+            do_drop_col(table_name, obj.args)
+        else:
+            do_add_col(table_name, obj)
+
+
+class Walker(ast.NodeVisitor):
+    """visit the ast node and generate a table object"""
+
 
     def visit_FunctionDef(self, node):
+        """visit python functon definition"""
+        # only parse the up function
         if node.name != 'up':
             return
         for ast_with in node.body:
@@ -378,7 +276,7 @@ class Builder(ast.NodeVisitor):
                 assert isinstance(with_item, ast.withitem)
                 assert len(with_item.context_expr.args) == 1
                 table_name = with_item.context_expr.args[0].s
-                self._generate_table(table_name, ast_with.body.copy())
+                _generate_table(table_name, ast_with.body.copy())
 
 
 def flatten(struct):
@@ -417,5 +315,5 @@ def dump():
 if __name__ == '__main__':
     for code in (code,):
         ast_code = ast.parse(code)
-        Builder().visit(ast_code)
+        Walker().visit(ast_code)
     dump()
